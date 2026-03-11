@@ -47,6 +47,23 @@ __device__ vec3 reflect(const vec3& v, const vec3& n) {
     return v - n * 2.0f * v.dot(n);
 }
 
+__device__ bool refract(const vec3& v, const vec3& n, float niOverNt, vec3& refracted) {
+    vec3 uv = v.normalize();
+    float dt = uv.dot(n);
+    float disc = 1.0f - niOverNt * niOverNt * (1 - dt*dt);
+    if (disc > 0) {
+        refracted = (uv - n*dt) * niOverNt - n*sqrtf(disc);
+        return true;
+    }
+    return false;
+}
+
+__device__ float schlick(float cosine, float refIdx) {
+    float r0 = (1-refIdx) / (1+refIdx);
+    r0 = r0*r0;
+    return r0 + (1-r0)*powf(1-cosine, 5);
+}
+
 
 __device__ vec3 getColor(Ray r, Sphere* spheres, int numSpheres, curandState* state) {
     vec3 attenuation(1.0f, 1.0f, 1.0f);
@@ -82,6 +99,32 @@ __device__ vec3 getColor(Ray r, Sphere* spheres, int numSpheres, curandState* st
             reflected = reflected + randomInUnitSphere(state) * s.fuzz;
             attenuation = attenuation * s.color;
             r = Ray(hitPoint, reflected);
+        } else if (s.material == 2) {
+            // Glass
+            vec3 outwardNormal;
+            float niOverNt;
+            float cosine;
+            vec3 refracted;
+            vec3 reflected = reflect(r.direction.normalize(), normal);
+
+            if (r.direction.dot(normal) > 0) {
+                outwardNormal = normal * -1;
+                niOverNt = 1.5f;
+                cosine = 1.5f * r.direction.dot(normal) / r.direction.length();
+            } else {
+                outwardNormal = normal;
+                niOverNt = 1.0f / 1.5f;
+                cosine = -r.direction.dot(normal) / r.direction.length();
+            }
+
+            float reflectProb = refract(r.direction, outwardNormal, niOverNt, refracted)
+                                ? schlick(cosine, 1.5f) : 1.0f;
+
+            if (curand_uniform(state) < reflectProb)
+                r = Ray(hitPoint, reflected);
+            else
+                r = Ray(hitPoint, refracted);
+            attenuation = attenuation * vec3(1.0f, 1.0f, 1.0f);
         }
     }
     return vec3(0,0,0);
@@ -138,17 +181,24 @@ __global__ void render(unsigned char* output, int width, int height,
 int main() {
     const int WIDTH   = 1200;
     const int HEIGHT  = 675;
-    const int SAMPLES = 64;
+    const int SAMPLES = 128;
 
     Sphere scene[] = {
+
         {vec3(0, -100.5f, -1), 100.0f, vec3(0.5f, 0.7f, 0.3f), 0, 0},
-        {vec3(0, 0, -1.5f),   0.5f,   vec3(0.8f, 0.3f, 0.3f), 0, 0},
-        {vec3(-1.1f, 0, -1.5f), 0.5f, vec3(0.8f, 0.8f, 0.8f), 1, 0.1f},
-        {vec3(1.1f, 0, -1.5f),  0.5f, vec3(0.8f, 0.6f, 0.2f), 1, 0.3f},
-        {vec3(0, 1.2f, -1.5f),  0.3f, vec3(0.3f, 0.5f, 0.9f), 0, 0},
+
+        {vec3(0, 0, -1.5f),    0.5f,   vec3(0.8f, 0.3f, 0.3f), 0, 0},
+
+        {vec3(-1.1f, 0, -1.5f), 0.5f,  vec3(1.0f, 1.0f, 1.0f), 2, 0},
+
+        {vec3(1.1f, 0, -1.5f),  0.5f,  vec3(0.8f, 0.6f, 0.2f), 1, 0.1f},
+
+        {vec3(0, 1.2f, -1.5f),  0.3f,  vec3(0.3f, 0.5f, 0.9f), 0, 0},
+
+        {vec3(0.4f, -0.3f, -0.8f), 0.2f, vec3(1,1,1), 2, 0},
     };
 
-    int numSpheres = 5;
+    int numSpheres = 6;
     int imageSize  = WIDTH * HEIGHT * 3;
 
     Sphere* d_spheres;
